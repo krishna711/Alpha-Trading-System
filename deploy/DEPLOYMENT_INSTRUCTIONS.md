@@ -114,39 +114,61 @@ sudo systemctl status alpha-bot
 
 ---
 
-## 4. Configure Nginx Reverse Proxy & Optional HTTPS
+## 4. Configure Nginx Reverse Proxy & SSL
 
-### Option A: Quick Setup Using Provided Config
-Copy the Nginx template (already updated without `auth_basic` conflict):
-```bash
-sudo cp /home/ubuntu/trading_system/deploy/nginx_trading_bot.conf /etc/nginx/sites-available/trading_bot
-```
-Edit `server_name`:
-```bash
-sudo nano /etc/nginx/sites-available/trading_bot
-# Replace `your_domain_or_server_ip` with your VPS IP or domain (e.g., trade.yourdomain.com)
-```
-Enable the site and restart Nginx:
-```bash
-sudo ln -s /etc/nginx/sites-available/trading_bot /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl restart nginx
-```
+### Option A: Deploying on **CloudPanel** (Important!)
+If your server uses **CloudPanel**, do **NOT** manually edit `/etc/nginx/sites-available/` or run `certbot` in SSH — CloudPanel manages Nginx and SSL certificates itself.
 
-### Option B: Enable Free HTTPS / SSL (Recommended if Using a Domain)
-```bash
-sudo apt install certbot python3-certbot-nginx -y
-sudo certbot --nginx -d trade.yourdomain.com
-```
+1. **Create a Reverse Proxy Site in CloudPanel:**
+   - In CloudPanel Dashboard: **Sites** ➔ **+ Add Site** ➔ **Create a Reverse Proxy**.
+   - **Domain Name:** `ats.yotek.net` (your subdomain).
+   - **Reverse Proxy Url:** `http://127.0.0.1:8000`
+   - *(If you already created a Python Site instead, open **Sites ➔ Your Site ➔ Vhost**, ensure `location /` proxies directly to `http://127.0.0.1:8000;` with no static fallback to `htdocs/`.)*
 
-### Configure Firewall (UFW):
-```bash
-sudo ufw allow 22/tcp
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw enable
-```
+2. **Security Check for `htdocs/` Folder:**
+   - Keep your code outside `htdocs/` (e.g. `/home/<site-user>/alpha-trading-system`), **or** verify in **Vhost** that ALL requests route directly to `proxy_pass http://127.0.0.1:8000;` so files like `state/trading_system.db` are never served statically by Nginx.
+
+3. **Fix File Ownership (`chown`):**
+   - If you ever ran `git`, `pip`, or `python manage.py` as `root`/`sudo`, ensure your CloudPanel site user owns the app folder so the `systemd` services can write to SQLite and logs:
+   ```bash
+   sudo chown -R yotek-ats:yotek-ats /home/yotek-ats/htdocs/ats.yotek.net/alpha-trading-system
+   ```
+
+4. **Enable Free SSL in CloudPanel UI:**
+   - Go to **Sites ➔ Your Domain ➔ SSL/TLS ➔ Actions ➔ New Let's Encrypt Certificate**.
+   - CloudPanel automatically provisions and renews HTTPS. (Leave port `8000` closed in firewall; Nginx handles `443` ➔ `127.0.0.1:8000`).
+
+---
+
+### Option B: Standard Ubuntu Server (Without CloudPanel)
+1. Copy the Nginx template (already updated without `auth_basic` conflict):
+   ```bash
+   sudo cp /home/ubuntu/trading_system/deploy/nginx_trading_bot.conf /etc/nginx/sites-available/trading_bot
+   ```
+2. Edit `server_name`:
+   ```bash
+   sudo nano /etc/nginx/sites-available/trading_bot
+   # Replace `your_domain_or_server_ip` with your VPS IP or domain (e.g., trade.yourdomain.com)
+   ```
+3. Enable the site and restart Nginx:
+   ```bash
+   sudo ln -s /etc/nginx/sites-available/trading_bot /etc/nginx/sites-enabled/
+   sudo rm -f /etc/nginx/sites-enabled/default
+   sudo nginx -t
+   sudo systemctl restart nginx
+   ```
+4. Enable Free HTTPS / SSL (Let's Encrypt):
+   ```bash
+   sudo apt install certbot python3-certbot-nginx -y
+   sudo certbot --nginx -d trade.yourdomain.com
+   ```
+5. Configure Firewall (UFW):
+   ```bash
+   sudo ufw allow 22/tcp
+   sudo ufw allow 80/tcp
+   sudo ufw allow 443/tcp
+   sudo ufw enable
+   ```
 
 ---
 
