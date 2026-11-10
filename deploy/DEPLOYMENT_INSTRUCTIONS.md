@@ -102,7 +102,15 @@ sudo systemctl status alpha-web
 sudo systemctl status alpha-bot
 ```
 
-> **Note:** If you run the server as a user other than `ubuntu`, edit `User=ubuntu` and `/home/ubuntu/trading_system` inside both `.service` files before copying them.
+> **Using a Custom User or Directory (e.g. CloudPanel `/home/yotek-ats/htdocs/...`)?**
+> Replace `ubuntu` and `/home/ubuntu/trading_system` in the copied service files before starting:
+> ```bash
+> APP_DIR=$(pwd)
+> APP_USER=$(whoami)
+> sudo sed -i "s|User=ubuntu|User=$APP_USER|g; s|/home/ubuntu/trading_system|$APP_DIR|g" /etc/systemd/system/alpha-web.service /etc/systemd/system/alpha-bot.service
+> sudo systemctl daemon-reload
+> sudo systemctl restart alpha-web alpha-bot
+> ```
 
 ---
 
@@ -170,11 +178,11 @@ sudo systemctl restart alpha-web alpha-bot
 ### Useful Server Commands:
 | Task | Command |
 |---|---|
-| **Watch Trading Bot Logs** | `tail -f /home/ubuntu/trading_system/logs/systemd_bot.log` |
-| **Watch Web UI Logs** | `tail -f /home/ubuntu/trading_system/logs/systemd_web.log` |
-| **View Systemd Journal** | `journalctl -u alpha-bot -u alpha-web -f` |
+| **Watch Trading Bot Logs** | `tail -f logs/trading_bot.log` |
+| **View Systemd Service Logs** | `sudo journalctl -u alpha-bot -u alpha-web -f` |
 | **Restart Both Services** | `sudo systemctl restart alpha-web alpha-bot` |
 | **List All Users & PnL** | `source venv/bin/activate && python manage.py list-users` |
 | **Reset User Password** | `source venv/bin/activate && python manage.py change-password <user> <newpass>` |
 | **View Market Holidays** | `source venv/bin/activate && python manage.py holidays` |
 | **Force Test Signal Scan** | `source venv/bin/activate && python manage.py scan --force` |
+
