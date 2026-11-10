@@ -1,0 +1,19 @@
+[Unit]
+Description=Alpha Trading System - Live Bot Daemon & Auto-Login
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading_system
+Environment="PYTHONUNBUFFERED=1"
+Environment="TZ=Asia/Kolkata"
+ExecStart=/home/ubuntu/trading_system/venv/bin/python run_trading_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/trading_system/logs/systemd_bot.log
+StandardError=append:/home/ubuntu/trading_system/logs/systemd_bot_err.log
+
+[Install]
+WantedBy=multi-user.target
+

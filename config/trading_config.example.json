@@ -1,0 +1,73 @@
+{
+  "broker": {
+    "name": "DHAN",
+    "client_id": "",
+    "access_token": "",
+    "trading_mode": "PAPER",
+    "product_type": "CNC"
+  },
+  "strategy": {
+    "timeframe": "1h",
+    "supertrend_period": 8,
+    "supertrend_multiplier": 3.2,
+    "macd_fast": 9,
+    "macd_slow": 23,
+    "macd_signal": 7,
+    "default_sl_mode": "CANDLE_LOW"
+  },
+  "execution": {
+    "poll_interval_seconds": 60,
+    "check_stoploss_intraday": true,
+    "market_open_time": "09:15",
+    "market_close_time": "15:30",
+    "candle_close_minutes": [
+      15
+    ]
+  },
+  "stocks": {
+    "BSE": {
+      "symbol": "BSE",
+      "exchange": "NSE",
+      "allocated_capital": 250000.0,
+      "sl_mode": "CANDLE_LOW",
+      "enabled": true,
+      "notes": "Market Infrastructure Runner"
+    },
+    "MCX": {
+      "symbol": "MCX",
+      "exchange": "NSE",
+      "allocated_capital": 100000.0,
+      "sl_mode": "CANDLE_LOW",
+      "enabled": true,
+      "notes": "Commodity Exchange Runner"
+    },
+    "CDSL": {
+      "symbol": "CDSL",
+      "exchange": "NSE",
+      "allocated_capital": 100000.0,
+      "sl_mode": "CANDLE_LOW",
+      "enabled": true,
+      "notes": "Depository Compounder"
+    },
+    "TRENT": {
+      "symbol": "TRENT",
+      "exchange": "NSE",
+      "allocated_capital": 150000.0,
+      "sl_mode": "CANDLE_LOW",
+      "enabled": true,
+      "notes": "Retail Momentum Leader"
+    }
+  },
+  "auth": {
+    "auto_login_enabled": false,
+    "auto_login_time": "09:00",
+    "client_id": "",
+    "pin": "",
+    "totp_secret": "",
+    "api_key": "",
+    "api_secret": "",
+    "last_login_time": "",
+    "last_login_status": "NOT_CONFIGURED",
+    "last_login_message": ""
+  }
+}

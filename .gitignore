@@ -1,0 +1,26 @@
+# Sensitive local configuration & broker tokens/PINs
+config/trading_config.json
+.env
+*.env
+
+# Database, trade state & runtime logs
+state/
+logs/
+cache/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+[Unit]
+Description=Alpha Trading System - FastAPI Web Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading_system
+Environment="PYTHONUNBUFFERED=1"
+Environment="TZ=Asia/Kolkata"
+ExecStart=/home/ubuntu/trading_system/venv/bin/python web/server.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/trading_system/logs/systemd_web.log
+StandardError=append:/home/ubuntu/trading_system/logs/systemd_web_err.log
+
+[Install]
+WantedBy=multi-user.target
+
