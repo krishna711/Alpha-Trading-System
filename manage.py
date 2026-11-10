@@ -2,7 +2,7 @@ import sys
 import os
 
 # Ensure engine path is in sys.path
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import engine.silence_warnings
 import argparse

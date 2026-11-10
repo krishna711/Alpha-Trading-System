@@ -3,10 +3,13 @@ config/trading_config.json
 .env
 *.env
 
-# Database, trade state & runtime logs
-state/
-logs/
-cache/
+# Database, trade state & runtime logs (preserve empty directory stubs)
+state/*
+!state/.gitkeep
+logs/*
+!logs/.gitkeep
+cache/*
+!cache/.gitkeep
 *.db
 *.sqlite
 *.sqlite3

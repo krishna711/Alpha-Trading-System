@@ -2,7 +2,7 @@ import os
 import sys
 
 # Ensure trading_system directory is on sys.path
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import engine.silence_warnings
 import time
