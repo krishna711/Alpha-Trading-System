@@ -31,17 +31,17 @@ def log_message(msg: str):
     except Exception:
         pass
 
-def is_hourly_bar_close(now: datetime, window_seconds: int = 120) -> bool:
+def is_hourly_bar_close(now: datetime, min_delay_seconds: int = 15, window_seconds: int = 150) -> bool:
     """
     NSE hourly bars complete at:
     10:15, 11:15, 12:15, 13:15, 14:15, 15:15 IST
-    Checks if current time is within window_seconds after bar completion.
+    Waits at least min_delay_seconds after bar close so market feeds finalize the closed candle.
     """
     bar_close_hours = [10, 11, 12, 13, 14, 15]
     for h in bar_close_hours:
         close_time = now.replace(hour=h, minute=15, second=0, microsecond=0)
         diff = (now - close_time).total_seconds()
-        if 0 <= diff <= window_seconds:
+        if min_delay_seconds <= diff <= window_seconds:
             return True
     return False
 
@@ -122,6 +122,7 @@ def main():
                     last_candle_checked = current_candle_id
             
             # Intraday Stop Loss Monitoring (Checks open positions against LTP every minute across all users)
+            ltp_cache = {}
             current_users = UserManager.get_all_users()
             for u in current_users:
                 if not u['is_active']:
@@ -135,7 +136,11 @@ def main():
                 for p in open_pos:
                     sym = p['symbol']
                     sl = float(p['stop_loss_price'])
-                    ltp = executor.data_fetcher.get_latest_price(sym)
+                    if sym not in ltp_cache:
+                        ltp_cache[sym] = executor.data_fetcher.get_latest_price(sym)
+                    ltp = ltp_cache[sym]
+                    if ltp is not None:
+                        ltp = round(float(ltp), 2)
                     if ltp and ltp <= sl:
                         log_message(f"🚨 INTRADAY STOP LOSS HIT for User {u['username']} on {sym}! LTP: Rs. {ltp:.2f} <= SL: Rs. {sl:.2f}")
                         shares = int(p['shares'])

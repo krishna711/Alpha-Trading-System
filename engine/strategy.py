@@ -93,33 +93,72 @@ class SuperTrendMACDStrategy:
         
         return df
 
-    def evaluate_signals(self, df: pd.DataFrame, sl_mode: str = "CANDLE_LOW") -> Dict[str, Any]:
+    @staticmethod
+    def drop_unclosed_bars(df: pd.DataFrame, now_ist: Optional[pd.Timestamp] = None) -> pd.DataFrame:
+        """
+        Drops any trailing hourly bar that has not yet closed in IST (Asia/Kolkata).
+        Yahoo Finance emits a partial in-progress bar immediately at bar open (e.g. 11:15:00),
+        whose Low/Close equal the opening price until it finishes forming at 12:15:00.
+        """
+        if df is None or df.empty:
+            return df
+
+        if now_ist is None:
+            now_ist = pd.Timestamp.now(tz='Asia/Kolkata')
+        elif now_ist.tzinfo is None:
+            now_ist = now_ist.tz_localize('Asia/Kolkata')
+        else:
+            now_ist = now_ist.tz_convert('Asia/Kolkata')
+
+        df_clean = df.copy()
+        if df_clean.index.tz is None:
+            df_clean.index = df_clean.index.tz_localize('Asia/Kolkata')
+        else:
+            df_clean.index = df_clean.index.tz_convert('Asia/Kolkata')
+
+        while not df_clean.empty:
+            last_ts = df_clean.index[-1]
+            # Standard NSE hourly candle runs 60m; the 15:15 candle runs 15m until 15:30 market close
+            duration_mins = 15 if (last_ts.hour == 15 and last_ts.minute == 15) else 60
+            bar_close_ts = last_ts + pd.Timedelta(minutes=duration_mins)
+            if now_ist < bar_close_ts:
+                df_clean = df_clean.iloc[:-1]
+            else:
+                break
+        return df_clean
+
+    def evaluate_signals(self, df: pd.DataFrame, sl_mode: str = "CANDLE_LOW", only_closed: bool = True) -> Dict[str, Any]:
         """
         Evaluates current signal at the latest completed hourly bar.
-        Returns a dictionary containing:
-        - action: 'BUY', 'SELL', or 'HOLD'
-        - reason: explanation of signal
-        - current_price: close price of latest bar
-        - candle_low: low price of latest bar
-        - proposed_sl: calculated stop loss based on sl_mode
-        - st_direction: 1 (bullish) or -1 (bearish)
-        - macd: current MACD value
-        - signal: current Signal value
+        Matches the exact backtest entry/exit transitions:
+        - BUY: Both SuperTrend & MACD are bullish on latest closed bar AND were NOT both bullish on prior bar.
+        - SELL: MACD crossed below Signal Line on latest closed bar.
         """
-        df_ind = self.compute_indicators(df)
+        df_eval = self.drop_unclosed_bars(df) if only_closed else df
+        if df_eval is None or len(df_eval) < 2:
+            return {'action': 'HOLD', 'reason': 'Insufficient closed bars', 'current_price': 0.0, 'candle_low': 0.0, 'proposed_sl': 0.0, 'is_st_bullish': False, 'is_macd_bullish': False, 'macd': 0.0, 'signal': 0.0, 'timestamp': ''}
+
+        df_ind = self.compute_indicators(df_eval)
         if len(df_ind) < 2:
-            return {'action': 'HOLD', 'reason': 'Insufficient bars'}
+            return {'action': 'HOLD', 'reason': 'Insufficient bars', 'current_price': 0.0, 'candle_low': 0.0, 'proposed_sl': 0.0, 'is_st_bullish': False, 'is_macd_bullish': False, 'macd': 0.0, 'signal': 0.0, 'timestamp': ''}
             
         curr = df_ind.iloc[-1]
         prev = df_ind.iloc[-2]
         
         st_bullish = (curr['ST_Direction'] == 1)
+        prev_st_bullish = (prev['ST_Direction'] == 1)
         macd_above_signal = (curr['MACD'] > curr['Signal'])
+        prev_macd_above_signal = (prev['MACD'] > prev['Signal'])
+
         macd_cross_down = (prev['MACD'] >= prev['Signal']) and (curr['MACD'] < curr['Signal'])
         macd_cross_up = (prev['MACD'] <= prev['Signal']) and (curr['MACD'] > curr['Signal'])
+
+        curr_both_buy = st_bullish and macd_above_signal
+        prev_both_buy = prev_st_bullish and prev_macd_above_signal
+        is_fresh_entry = curr_both_buy and (not prev_both_buy)
         
-        current_price = float(curr['Close'])
-        candle_low = float(curr['Low'])
+        current_price = round(float(curr['Close']), 2)
+        candle_low = round(float(curr['Low']), 2)
         
         if sl_mode.upper() == 'CANDLE_LOW':
             proposed_sl = candle_low
@@ -137,23 +176,30 @@ class SuperTrendMACDStrategy:
             'signal': round(float(curr['Signal']), 2),
             'is_macd_bullish': bool(macd_above_signal),
             'macd_cross_down': bool(macd_cross_down),
+            'is_fresh_entry': bool(is_fresh_entry),
             'action': 'HOLD',
             'reason': 'No change in signal'
         }
         
-        # Exit Signal
+        # 1. Exit Signal
         if macd_cross_down:
             result['action'] = 'SELL'
             result['reason'] = 'Bearish momentum exit signal'
             return result
             
-        # Entry Signal: Trend is Bullish and Momentum > Signal
-        if st_bullish and macd_above_signal:
+        # 2. Fresh Entry Signal (matches backtest rule: both bullish now AND not both bullish on prior bar)
+        if is_fresh_entry:
             result['action'] = 'BUY'
             if macd_cross_up:
                 result['reason'] = 'Fresh bullish breakout signal'
             else:
-                result['reason'] = 'Sustained bullish trend & momentum'
+                result['reason'] = 'Fresh bullish trend alignment signal'
+            return result
+
+        # 3. Sustained trend (already active from prior candle - do not chase or re-buy post SL)
+        if curr_both_buy:
+            result['action'] = 'HOLD'
+            result['reason'] = 'Bullish trend active (waiting for fresh entry or holding)'
             return result
             
         return result
