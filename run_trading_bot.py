@@ -47,10 +47,7 @@ def is_hourly_bar_close(now: datetime, min_delay_seconds: int = 15, window_secon
 
 def run_single_evaluation(executor: TradingExecutor):
     """Executes a single evaluation pass for all users and returns the results."""
-    log_message("Starting Multi-User Strategy Evaluation Cycle...")
-    results = executor.run_cycle_all_users()
-    log_message(f"Evaluation Cycle Completed. Evaluated {results.get('users_evaluated', 0)} users.")
-    return results
+    return executor.run_cycle_all_users()
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-User Alpha Trading Bot for Dhan")

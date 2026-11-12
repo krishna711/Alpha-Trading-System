@@ -459,6 +459,12 @@ class UserManager:
             win_trades = [t for t in trades if t['pnl'] > 0]
             win_rate = (len(win_trades) / len(trades) * 100.0) if trades else 0.0
 
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            last_time = b_cfg.get('last_login_time') or ''
+            last_status = b_cfg.get('last_login_status') or 'N/A'
+            has_token = bool((b_cfg.get('access_token') or '').strip())
+            logged_in_today = bool(last_time.startswith(today_str) and last_status == 'SUCCESS')
+
             overview.append({
                 'user_id': uid,
                 'username': u['username'],
@@ -466,7 +472,10 @@ class UserManager:
                 'role': u['role'],
                 'trading_mode': b_cfg.get('trading_mode', 'PAPER'),
                 'auto_login': bool(b_cfg.get('auto_login_enabled')),
-                'last_login_status': b_cfg.get('last_login_status', 'N/A'),
+                'last_login_status': last_status,
+                'last_login_time': last_time,
+                'has_token': has_token,
+                'logged_in_today': logged_in_today,
                 'total_stocks': len(stocks),
                 'active_stocks': len([s for s in stocks if s['enabled']]),
                 'open_positions': len(open_pos),

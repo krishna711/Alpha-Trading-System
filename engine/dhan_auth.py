@@ -2,8 +2,9 @@ import os
 import re
 import json
 import time
+import base64
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 
 try:
@@ -14,11 +15,42 @@ except ImportError:
 from .config_manager import ConfigManager
 from .user_manager import UserManager
 
+LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'trading_bot.log')
+IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
+
+def _log_auth_event(msg: str):
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    line = f"[{ts}] {msg}"
+    print(line)
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
+    except Exception:
+        pass
+
+def _decode_jwt_expiry(token: str) -> Optional[datetime]:
+    """Extracts JWT 'exp' claim (as IST naive datetime) without external dependencies."""
+    if not token or token.count('.') != 2:
+        return None
+    try:
+        payload_b64 = token.split('.')[1]
+        padding = '=' * (-len(payload_b64) % 4)
+        decoded_bytes = base64.urlsafe_b64decode(payload_b64 + padding)
+        payload = json.loads(decoded_bytes.decode('utf-8'))
+        exp = payload.get('exp')
+        if exp:
+            return datetime.fromtimestamp(float(exp), tz=IST_OFFSET).replace(tzinfo=None)
+    except Exception:
+        pass
+    return None
+
 class DhanAuthManager:
     """
     Automated Dhan Authentication Manager (Multi-User Aware):
     - Generates live TOTP codes from user's TOTP secret key
     - Performs automated daily login at 09:00 AM using PIN + TOTP + API Keys per user
+    - Tracks access token generation & JWT expiry status per user
     - Saves fresh access token to user's database configuration
     - Supports Enable/Disable toggle per user
     """
@@ -29,7 +61,6 @@ class DhanAuthManager:
         """Returns auth settings for a specific user from DB."""
         cfg = UserManager.get_user_broker_config(user_id)
         if not cfg:
-            # Fallback to json if not in db
             conf = self.config_mgr.load()
             return conf.get('auth', {})
         return cfg
@@ -38,11 +69,64 @@ class DhanAuthManager:
     def auth_config(self) -> Dict[str, Any]:
         return self.get_auth_config(user_id=1)
 
+    def get_token_status(self, user_id: int = 1) -> Dict[str, Any]:
+        """
+        Inspects the user's current Dhan access token and login state.
+        Returns a structured dictionary indicating whether token is generated & active today.
+        """
+        cfg = self.get_auth_config(user_id)
+        token = (cfg.get('access_token') or '').strip()
+        last_time = cfg.get('last_login_time') or ''
+        last_status = cfg.get('last_login_status') or 'NOT_CONFIGURED'
+        last_msg = cfg.get('last_login_message') or ''
+        today_str = datetime.now().strftime('%Y-%m-%d')
+
+        has_token = bool(token)
+        exp_dt = _decode_jwt_expiry(token) if has_token else None
+        now_dt = datetime.now()
+
+        if exp_dt is not None:
+            is_expired = now_dt >= exp_dt
+            expires_at_str = exp_dt.strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            is_expired = False
+            expires_at_str = ''
+
+        logged_in_today = bool(last_time.startswith(today_str) and last_status == 'SUCCESS')
+        # Token is considered active if present, not expired by JWT exp, and not failed on last attempt
+        is_logged_in = has_token and (not is_expired) and (last_status == 'SUCCESS' or exp_dt is not None)
+
+        token_preview = f"{token[:6]}...{token[-6:]}" if len(token) > 14 else ("***" if has_token else "")
+
+        if is_logged_in:
+            if logged_in_today:
+                label = f"Token Active (Logged in today at {last_time.split(' ')[-1]})"
+            else:
+                label = "Token Active (Logged in to Dhan)"
+        elif has_token and is_expired:
+            label = f"Token Expired (Expired at {expires_at_str}) — Re-Login Needed"
+        elif last_status == 'FAILED':
+            label = "Login Failed — Check Credentials"
+        else:
+            label = "Not Logged In (No Token Generated)"
+
+        return {
+            'has_token': has_token,
+            'is_logged_in': is_logged_in,
+            'is_expired': is_expired,
+            'logged_in_today': logged_in_today,
+            'expires_at': expires_at_str,
+            'token_preview': token_preview,
+            'last_login_time': last_time or 'Never',
+            'last_login_status': last_status,
+            'last_login_message': last_msg,
+            'label': label
+        }
+
     def update_auth_config(self, user_id: int = 1, **kwargs) -> Dict[str, Any]:
         """Updates authentication settings for a user."""
         res = UserManager.update_user_broker_config(user_id, **kwargs)
         if user_id == 1:
-            # Sync to json for backwards compatibility
             conf = self.config_mgr.load()
             if 'auth' not in conf:
                 conf['auth'] = {}
@@ -68,16 +152,19 @@ class DhanAuthManager:
             totp = pyotp.TOTP(secret)
             return totp.now()
         except Exception as e:
-            print(f"[DhanAuth User {user_id}] Error generating TOTP: {e}")
+            _log_auth_event(f"[DhanAuth User {user_id}] Error generating TOTP: {e}")
             return None
 
-    def execute_login(self, user_id: int = 1) -> Dict[str, Any]:
+    def execute_login(self, user_id: int = 1, source: str = "MANUAL") -> Dict[str, Any]:
         """
         Executes automated login to Dhan for a specific user:
         1. Generates fresh TOTP from user's TOTP Secret
         2. Submits PIN + TOTP + Client ID to Dhan Auth API
         3. Extracts Access Token and updates user configuration
         """
+        user_info = UserManager.get_user_by_id(user_id)
+        uname = user_info['username'] if user_info else f"id={user_id}"
+
         auth_cfg = self.get_auth_config(user_id)
         client_id = (auth_cfg.get('dhan_client_id') or auth_cfg.get('client_id') or '').strip()
         pin = str(auth_cfg.get('dhan_pin') or auth_cfg.get('pin') or '').strip()
@@ -86,15 +173,17 @@ class DhanAuthManager:
         if not client_id or not pin or not totp_secret:
             msg = "Missing credentials: Dhan Client ID, PIN, and TOTP Secret must be configured."
             self._update_login_status(user_id, "FAILED", msg)
+            _log_auth_event(f"❌ Dhan {source} Login FAILED for User '{uname}': {msg}")
             return {'status': 'FAILED', 'message': msg}
 
         totp_code = self.generate_current_totp(user_id)
         if not totp_code:
             msg = "Failed to generate TOTP code. Verify totp_secret format."
             self._update_login_status(user_id, "FAILED", msg)
+            _log_auth_event(f"❌ Dhan {source} Login FAILED for User '{uname}': {msg}")
             return {'status': 'FAILED', 'message': msg}
 
-        print(f"[DhanAuth User {user_id}] Attempting login for Client ID: {client_id} with PIN and TOTP: {totp_code}...")
+        _log_auth_event(f"🔑 Dhan {source} Login Triggered for User '{uname}' (Client ID: {client_id})...")
 
         # 1. Try DhanHQ SDK DhanLogin
         try:
@@ -111,9 +200,12 @@ class DhanAuthManager:
 
             if token:
                 self._save_token(user_id, token)
-                msg = "Login Successful. Access token generated and saved."
+                exp_dt = _decode_jwt_expiry(token)
+                exp_str = exp_dt.strftime('%Y-%m-%d %H:%M:%S') if exp_dt else "24h"
+                msg = f"Logged in ({source}). Access token generated & active (Expires: {exp_str})."
                 self._update_login_status(user_id, "SUCCESS", msg)
-                return {'status': 'SUCCESS', 'access_token': token, 'message': msg}
+                _log_auth_event(f"✅ Dhan Token Generated ({source}) for User '{uname}' | Active until {exp_str}")
+                return {'status': 'SUCCESS', 'access_token': token, 'expires_at': exp_str, 'message': msg}
             else:
                 err_msg = resp.get('remarks') or resp.get('message') or str(resp)
         except Exception as e:
@@ -144,17 +236,22 @@ class DhanAuthManager:
             token = data.get('accessToken') or data.get('access_token') or data.get('token')
             if token:
                 self._save_token(user_id, token)
-                msg = "Login Successful via REST API. Access token generated and saved."
+                exp_dt = _decode_jwt_expiry(token)
+                exp_str = exp_dt.strftime('%Y-%m-%d %H:%M:%S') if exp_dt else "24h"
+                msg = f"Logged in ({source} REST). Access token generated & active (Expires: {exp_str})."
                 self._update_login_status(user_id, "SUCCESS", msg)
-                return {'status': 'SUCCESS', 'access_token': token, 'message': msg}
+                _log_auth_event(f"✅ Dhan Token Generated ({source}) for User '{uname}' | Active until {exp_str}")
+                return {'status': 'SUCCESS', 'access_token': token, 'expires_at': exp_str, 'message': msg}
             else:
                 fail_msg = data.get('remarks') or data.get('message') or f"HTTP {r.status_code}: {r.text}"
                 self._update_login_status(user_id, "FAILED", fail_msg)
+                _log_auth_event(f"❌ Dhan {source} Login FAILED for User '{uname}': {fail_msg}")
                 return {'status': 'FAILED', 'message': fail_msg, 'response': data}
 
         except Exception as e:
             msg = f"Network or API error during Dhan login: {e}"
             self._update_login_status(user_id, "FAILED", msg)
+            _log_auth_event(f"❌ Dhan {source} Login FAILED for User '{uname}': {msg}")
             return {'status': 'FAILED', 'message': msg}
 
     def _save_token(self, user_id: int, token: str):
@@ -191,7 +288,6 @@ class DhanAuthManager:
         Iterates over all users who have enabled auto-login and triggers login at scheduled time.
         """
         now = now or datetime.now()
-        # Only weekdays (Mon-Fri)
         if now.weekday() > 4:
             return []
 
@@ -219,8 +315,7 @@ class DhanAuthManager:
             diff_sec = (now - target_dt).total_seconds()
 
             if 0 <= diff_sec <= 600:
-                print(f"[DhanAuth] ⏰ Auto-Login Triggered for User {u['username']} (ID: {uid}) at {now.strftime('%H:%M:%S')}")
-                res = self.execute_login(uid)
+                res = self.execute_login(uid, source="AUTO")
                 results.append({'user_id': uid, 'username': u['username'], 'result': res})
 
         return results

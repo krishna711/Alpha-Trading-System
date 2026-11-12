@@ -101,7 +101,8 @@ class TradingExecutor:
             # 1. Fetch 1h candles
             df_1h = self.fetch_candle_cached(sym)
             if df_1h is None or len(df_1h) < 10:
-                cycle_results.append({'symbol': sym, 'action': 'ERROR', 'reason': 'Data fetch failed'})
+                _log_event(f"   • {sym} [{user['username']}]: ❌ ERROR — Data fetch failed")
+                cycle_results.append({'symbol': sym, 'action': 'ERROR', 'reason': 'Data fetch failed', 'action_taken': 'ERROR'})
                 continue
 
             # 2. Evaluate strategy on STRICTLY CLOSED hourly bars
@@ -123,7 +124,8 @@ class TradingExecutor:
                 'signal': signal_eval['signal'],
                 'action': action,
                 'in_position': in_pos,
-                'action_taken': 'NONE'
+                'action_taken': 'NONE',
+                'bar_time': signal_eval.get('timestamp', '')
             }
 
             # 3. Position Management (If holding position)
@@ -143,7 +145,6 @@ class TradingExecutor:
                     sl_hit = True
 
                 if sl_hit:
-                    _log_event(f"[User {user['username']} | {sym}] ⚠️ STOP LOSS HIT! Bar Low: Rs. {candle_low:.2f} / LTP: Rs. {live_ltp:.2f} <= SL: Rs. {sl_price:.2f}")
                     order_resp = broker.place_order(sym, 'SELL', shares, price=live_ltp)
                     if order_resp.get('status') == 'SUCCESS':
                         UserManager.close_user_position(
@@ -153,13 +154,16 @@ class TradingExecutor:
                             exit_reason=f'SL_HIT_{sl_mode}',
                             exit_order_id=order_resp.get('order_id', '')
                         )
-                        summary['action_taken'] = f"SL HIT -> SOLD {shares} @ {live_ltp:.2f}"
+                        summary['action_taken'] = f"SL HIT -> SOLD {shares} @ Rs. {live_ltp:.2f}"
+                        _log_event(f"   • {sym} [{user['username']}]: ⚠️ LTP Rs. {live_ltp:.2f} | Signal: SELL (SL) | Outcome: {summary['action_taken']}")
+                    else:
+                        summary['action_taken'] = f"SL SELL FAILED: {order_resp}"
+                        _log_event(f"   • {sym} [{user['username']}]: ❌ {summary['action_taken']}")
                     cycle_results.append(summary)
                     continue
 
                 # Check Bearish Momentum Exit
                 if action == 'SELL' and not is_entry_bar:
-                    _log_event(f"[User {user['username']} | {sym}] 🔴 Bearish Momentum Exit! Selling {shares} @ Rs. {live_ltp:.2f}")
                     order_resp = broker.place_order(sym, 'SELL', shares, price=live_ltp)
                     if order_resp.get('status') == 'SUCCESS':
                         UserManager.close_user_position(
@@ -169,11 +173,16 @@ class TradingExecutor:
                             exit_reason='MOMENTUM_EXIT',
                             exit_order_id=order_resp.get('order_id', '')
                         )
-                        summary['action_taken'] = f"EXIT SIGNAL -> SOLD {shares} @ {live_ltp:.2f}"
+                        summary['action_taken'] = f"EXIT SIGNAL -> SOLD {shares} @ Rs. {live_ltp:.2f}"
+                        _log_event(f"   • {sym} [{user['username']}]: 🔴 LTP Rs. {live_ltp:.2f} | Signal: SELL | Outcome: {summary['action_taken']}")
+                    else:
+                        summary['action_taken'] = f"EXIT SELL FAILED: {order_resp}"
+                        _log_event(f"   • {sym} [{user['username']}]: ❌ {summary['action_taken']}")
                     cycle_results.append(summary)
                     continue
 
-                summary['action_taken'] = f"HOLDING {shares} @ {entry_price:.2f} | PnL: Rs. {current_pnl:.2f}"
+                summary['action_taken'] = f"HOLDING {shares} @ Rs. {entry_price:.2f} (SL: Rs. {sl_price:.2f} | PnL: Rs. {current_pnl:+.2f})"
+                _log_event(f"   • {sym} [{user['username']}]: 🔵 LTP Rs. {live_ltp:.2f} | Signal: {action} | Outcome: {summary['action_taken']}")
                 cycle_results.append(summary)
                 continue
 
@@ -183,7 +192,8 @@ class TradingExecutor:
                     exec_price = live_ltp
                     shares = int(allocated_cap // exec_price)
                     if shares <= 0:
-                        summary['action_taken'] = "INSUFFICIENT_CAPITAL"
+                        summary['action_taken'] = f"INSUFFICIENT_CAPITAL (Alloc Rs. {allocated_cap:,.0f} < Price Rs. {exec_price:.2f})"
+                        _log_event(f"   • {sym} [{user['username']}]: ⚪ LTP Rs. {exec_price:.2f} | Signal: BUY | Outcome: {summary['action_taken']}")
                         cycle_results.append(summary)
                         continue
 
@@ -194,12 +204,11 @@ class TradingExecutor:
 
                     # Guard: Never enter a position if LTP is already at or below proposed SL
                     if proposed_sl >= exec_price:
-                        _log_event(f"[User {user['username']} | {sym}] ⚠️ SKIPPED ENTRY: LTP Rs. {exec_price:.2f} already <= SL Rs. {proposed_sl:.2f} (Signal bar {signal_eval['timestamp']})")
-                        summary['action_taken'] = f"SKIPPED_SL_BREACHED ({exec_price:.2f} <= {proposed_sl:.2f})"
+                        summary['action_taken'] = f"SKIPPED (LTP Rs. {exec_price:.2f} <= SL Rs. {proposed_sl:.2f})"
+                        _log_event(f"   • {sym} [{user['username']}]: ⚠️ LTP Rs. {exec_price:.2f} | Signal: BUY | Outcome: {summary['action_taken']}")
                         cycle_results.append(summary)
                         continue
 
-                    _log_event(f"[User {user['username']} | {sym}] 🟢 FRESH BUY SIGNAL ({signal_eval['timestamp']})! Shares: {shares} @ Rs. {exec_price:.2f} | SL ({sl_mode}): Rs. {proposed_sl:.2f}")
                     order_resp = broker.place_order(sym, 'BUY', shares, price=exec_price)
                     if order_resp.get('status') == 'SUCCESS':
                         UserManager.open_user_position(
@@ -213,11 +222,14 @@ class TradingExecutor:
                             entry_bar_time=signal_eval['timestamp'],
                             order_id=order_resp.get('order_id', '')
                         )
-                        summary['action_taken'] = f"BOUGHT {shares} @ {exec_price:.2f} | SL: {proposed_sl:.2f}"
+                        summary['action_taken'] = f"BOUGHT {shares} @ Rs. {exec_price:.2f} (SL: Rs. {proposed_sl:.2f})"
+                        _log_event(f"   • {sym} [{user['username']}]: 🟢 LTP Rs. {exec_price:.2f} | Signal: BUY | Outcome: {summary['action_taken']}")
                     else:
-                        _log_event(f"[User {user['username']} | {sym}] ❌ ORDER FAILED: {order_resp}")
+                        summary['action_taken'] = f"BUY FAILED: {order_resp}"
+                        _log_event(f"   • {sym} [{user['username']}]: ❌ LTP Rs. {exec_price:.2f} | Signal: BUY | Outcome: {summary['action_taken']}")
                 else:
                     summary['action_taken'] = f"FLAT ({reason})"
+                    _log_event(f"   • {sym} [{user['username']}]: ⚪ LTP Rs. {live_ltp:.2f} | Signal: {action} | Outcome: {summary['action_taken']}")
 
             cycle_results.append(summary)
 
@@ -226,27 +238,43 @@ class TradingExecutor:
         return cycle_results
 
     def run_cycle_all_users(self) -> Dict[str, Any]:
-        """Runs strategy execution across all active users in the system."""
+        """Runs strategy execution across all active users in the system with structured scan start/end logging."""
+        start_ts = time.time()
         self._data_cache.clear() # Reset caches for fresh hourly cycle
         self._ltp_cache.clear()
         users = UserManager.get_all_users()
-        total_executed = 0
+        active_users = [u for u in users if u['is_active']]
         all_results = {}
 
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print("\n" + "=" * 90)
-        print(f"[{now_str}] MULTI-USER STRATEGY CYCLE | Active Users: {len([u for u in users if u['is_active']])}")
-        print("=" * 90)
+        _log_event(f"🔍 HOURLY SCAN STARTED | Active Users: {len(active_users)}")
 
-        for u in users:
-            if not u['is_active']:
-                continue
+        buys = sells = holding = flat = errors = total_stocks = 0
+        for u in active_users:
             uid = u['id']
+            b_cfg = UserManager.get_user_broker_config(uid)
+            mode_str = b_cfg.get('trading_mode', 'PAPER')
+            _log_event(f"👤 Evaluating User '{u['username']}' (Mode: {mode_str})...")
             res = self.run_cycle_for_user(uid)
             all_results[u['username']] = res
-            total_executed += len(res)
+            for r in res:
+                total_stocks += 1
+                taken = r.get('action_taken', '')
+                if taken.startswith('BOUGHT'):
+                    buys += 1
+                elif 'SOLD' in taken:
+                    sells += 1
+                elif taken.startswith('HOLDING'):
+                    holding += 1
+                elif r.get('action') == 'ERROR' or 'FAILED' in taken:
+                    errors += 1
+                else:
+                    flat += 1
 
-        print("-" * 90)
+        elapsed = time.time() - start_ts
+        _log_event(
+            f"✅ HOURLY SCAN ENDED ({elapsed:.1f}s) | Users: {len(active_users)} | Stocks: {total_stocks} | "
+            f"Buys: {buys} | Sells: {sells} | Holding: {holding} | Flat/Skipped: {flat} | Errors: {errors}"
+        )
         return {'status': 'SUCCESS', 'users_evaluated': len(all_results), 'results': all_results}
 
     def run_cycle(self) -> List[Dict[str, Any]]:

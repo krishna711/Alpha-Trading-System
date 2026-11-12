@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import uvicorn
@@ -284,6 +285,8 @@ def get_user_dashboard(user_id: Optional[int] = None, current_user: Dict[str, An
     chart_labels.append(now_str)
     chart_data.append(round(total_pnl, 2))
 
+    token_info = auth_mgr.get_token_status(target_uid)
+
     return {
         'target_user': {
             'id': target_user['id'],
@@ -300,12 +303,19 @@ def get_user_dashboard(user_id: Optional[int] = None, current_user: Dict[str, An
         'auth': {
             'auto_login_enabled': bool(b_cfg.get('auto_login_enabled')),
             'auto_login_time': b_cfg.get('auto_login_time', '09:00'),
-            'last_login_time': b_cfg.get('last_login_time', 'Never'),
-            'last_login_status': b_cfg.get('last_login_status', 'NOT_CONFIGURED'),
-            'last_login_message': b_cfg.get('last_login_message', ''),
+            'last_login_time': token_info['last_login_time'],
+            'last_login_status': token_info['last_login_status'],
+            'last_login_message': token_info['last_login_message'],
             'has_pin': bool(b_cfg.get('dhan_pin')),
             'has_totp_secret': bool(b_cfg.get('totp_secret')),
-            'has_api_key': bool(b_cfg.get('api_key'))
+            'has_api_key': bool(b_cfg.get('api_key')),
+            'has_token': token_info['has_token'],
+            'is_logged_in': token_info['is_logged_in'],
+            'is_expired': token_info['is_expired'],
+            'logged_in_today': token_info['logged_in_today'],
+            'token_expires_at': token_info['expires_at'],
+            'token_preview': token_info['token_preview'],
+            'token_label': token_info['label']
         },
         'metrics': {
             'total_allocated': round(total_allocated, 2),
@@ -387,7 +397,7 @@ def api_save_dhan(req: DhanAuthSettingsRequest, current_user: Dict[str, Any] = D
 @app.post("/api/auth/login-dhan-now")
 def api_login_dhan_now(user_id: Optional[int] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     target_uid = resolve_target_user_id(current_user, user_id)
-    res = auth_mgr.execute_login(user_id=target_uid)
+    res = auth_mgr.execute_login(user_id=target_uid, source="MANUAL")
     return res
 
 # ----------------- MARKET SCHEDULE & HOLIDAYS API -----------------
@@ -471,16 +481,40 @@ def api_run_scan(user_id: Optional[int] = None, force: bool = False, current_use
     return {'market_closed': False, 'results': results, 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 @app.get("/api/logs")
-def api_get_logs(current_user: Dict[str, Any] = Depends(get_current_user)):
-    log_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'trading_bot.log')
-    if os.path.exists(log_file):
-        try:
-            with open(log_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            return {'logs': lines[-80:]}
-        except Exception as e:
-            return {'logs': [f"Error reading log file: {e}"]}
-    return {'logs': ["Log file not yet initialized."]}
+def api_get_logs(date: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Returns bot activity logs filtered strictly by date (default: today IST) along with available log dates."""
+    today_str = pd.Timestamp.now(tz='Asia/Kolkata').strftime('%Y-%m-%d')
+    target_date = date.strip() if date and date.strip() else today_str
+
+    log_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs', 'trading_bot.log')
+    if not os.path.exists(log_file):
+        return {'date': target_date, 'today': today_str, 'available_dates': [today_str], 'logs': []}
+
+    try:
+        date_pattern = re.compile(r'^\[(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\]')
+        available_dates = set([today_str])
+        filtered_lines = []
+        current_line_date = None
+
+        with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+            for raw_line in f:
+                line = raw_line.rstrip('\r\n')
+                m = date_pattern.match(line)
+                if m:
+                    current_line_date = m.group(1)
+                    available_dates.add(current_line_date)
+                if current_line_date == target_date:
+                    filtered_lines.append(line)
+
+        sorted_dates = sorted(available_dates, reverse=True)
+        return {
+            'date': target_date,
+            'today': today_str,
+            'available_dates': sorted_dates,
+            'logs': filtered_lines[-500:]
+        }
+    except Exception as e:
+        return {'date': target_date, 'today': today_str, 'available_dates': [today_str], 'logs': [f"Error reading log file: {e}"]}
 
 # ----------------- MODERN MULTI-USER DASHBOARD HTML -----------------
 
@@ -645,7 +679,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <span class="text-xs font-medium text-slate-400">Dhan Broker Status</span>
           <div id="metricDhanStatus" class="text-base md:text-lg font-bold text-indigo-400 mt-1">PAPER</div>
-          <span id="metricDhanLogin" class="text-xs text-slate-500">Auto-login: Off</span>
+          <div id="metricDhanToken" class="text-xs font-semibold text-slate-400 mt-0.5">Checking token...</div>
+          <span id="metricDhanLogin" class="text-[11px] text-slate-500 block mt-0.5">Auto-login: Off</span>
         </div>
       </div>
 
@@ -773,11 +808,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
           <!-- RECENT BOT LOGS -->
           <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
-            <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
               <span class="text-sm font-semibold text-white">Bot Activity Logs</span>
-              <button onclick="fetchLogs()" class="text-xs text-slate-400 hover:text-slate-200">⟳</button>
+              <div class="flex items-center gap-1.5">
+                <select id="logDateSelect" onchange="onLogDateSelectChange(this.value)" class="bg-slate-950 border border-slate-700 text-[11px] font-mono rounded-lg px-2 py-1 text-slate-200 focus:outline-none focus:border-indigo-500" title="View Logs by Date">
+                  <option value="">Today</option>
+                </select>
+                <button onclick="fetchLogs()" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 transition" title="Refresh Logs">⟳</button>
+              </div>
             </div>
-            <div id="botLogs" class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-300 h-48 overflow-y-auto custom-scrollbar space-y-1">
+            <div id="botLogs" class="bg-slate-950 p-3 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-300 h-72 overflow-y-auto custom-scrollbar space-y-1">
               Loading logs...
             </div>
           </div>
@@ -825,6 +865,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-lg w-full p-6 space-y-4">
       <h3 class="text-lg font-bold text-white">Dhan Auto-Login & Broker Credentials</h3>
       <p class="text-xs text-slate-400">Configure your personal Dhan credentials to automate daily 09:00 AM token generation via TOTP and PIN.</p>
+
+      <!-- TOKEN & SESSION STATUS BANNER -->
+      <div id="dhanTokenBanner" class="p-3 rounded-xl border text-xs space-y-1 bg-slate-950 border-slate-800">
+        <div id="dhanTokenBannerTitle" class="font-bold text-slate-300">Checking Dhan session...</div>
+        <div id="dhanTokenBannerMeta" class="text-[11px] text-slate-400 font-mono"></div>
+      </div>
       
       <div class="space-y-3 text-xs">
         <div class="flex items-center justify-between p-3 bg-slate-950 rounded-lg border border-slate-800">
@@ -1173,7 +1219,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </td>
           <td class="px-4 py-3 text-xs uppercase font-mono whitespace-nowrap">${u.role}</td>
           <td class="px-4 py-3 font-semibold text-xs whitespace-nowrap ${u.trading_mode === 'LIVE' ? 'text-rose-400' : 'text-emerald-400'}">${u.trading_mode}</td>
-          <td class="px-4 py-3 text-xs whitespace-nowrap">${u.auto_login ? '🟢 ON (09:00)' : '⚪ OFF'}</td>
+          <td class="px-4 py-3 text-xs whitespace-nowrap">
+            <div>${u.auto_login ? '🟢 ON (09:00)' : '⚪ OFF'}</div>
+            <div class="text-[10px] font-mono ${u.logged_in_today || u.has_token ? 'text-emerald-400' : (u.last_login_status === 'FAILED' ? 'text-rose-400' : 'text-slate-500')}">
+              ${u.logged_in_today ? '✓ Logged in today' : (u.has_token ? '✓ Token active' : (u.last_login_status === 'FAILED' ? '✗ Login failed' : 'No token'))}
+            </div>
+          </td>
           <td class="px-4 py-3 text-xs whitespace-nowrap">${u.active_stocks} / ${u.total_stocks}</td>
           <td class="px-4 py-3 font-mono text-xs whitespace-nowrap">₹${u.total_allocated.toLocaleString('en-IN')}</td>
           <td class="px-4 py-3 font-mono text-xs text-emerald-400 whitespace-nowrap">₹${u.total_invested.toLocaleString('en-IN')}</td>
@@ -1231,7 +1282,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           document.getElementById('metricDhanStatus').innerText = 'PAPER (Simulated)';
           document.getElementById('metricDhanStatus').className = 'text-base md:text-lg font-bold text-emerald-400 mt-1';
         }
-        document.getElementById('metricDhanLogin').innerText = `Auto-login: ${dashboardData.auth.auto_login_enabled ? 'ON (09:00)' : 'OFF'}`;
+
+        // Token & Auto-Login Status
+        const auth = dashboardData.auth || {};
+        const tokenEl = document.getElementById('metricDhanToken');
+        const loginBtn = document.getElementById('dhanLoginBtn');
+        if (auth.is_logged_in) {
+          tokenEl.innerText = `🟢 ${auth.logged_in_today ? 'Logged in today' : 'Token Active'}${auth.token_expires_at ? ' (Exp: ' + auth.token_expires_at.slice(11, 16) + ')' : ''}`;
+          tokenEl.className = 'text-xs font-semibold text-emerald-400 mt-0.5';
+          loginBtn.innerText = '🟢 Dhan Logged In ⚙';
+          loginBtn.className = 'px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-950/60 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60 transition whitespace-nowrap';
+        } else if (auth.has_token && auth.is_expired) {
+          tokenEl.innerText = '🟡 Token Expired — Re-Login Needed';
+          tokenEl.className = 'text-xs font-semibold text-amber-400 mt-0.5';
+          loginBtn.innerText = '🟡 Token Expired ⚙';
+          loginBtn.className = 'px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-950/60 text-amber-300 border border-amber-800 hover:bg-amber-900/60 transition whitespace-nowrap';
+        } else if (auth.last_login_status === 'FAILED') {
+          tokenEl.innerText = '🔴 Login Failed — Check Credentials';
+          tokenEl.className = 'text-xs font-semibold text-rose-400 mt-0.5';
+          loginBtn.innerText = '🔴 Dhan Login Failed ⚙';
+          loginBtn.className = 'px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-950/60 text-rose-300 border border-rose-800 hover:bg-rose-900/60 transition whitespace-nowrap';
+        } else {
+          tokenEl.innerText = '⚪ Not Logged In (No Token)';
+          tokenEl.className = 'text-xs font-semibold text-slate-400 mt-0.5';
+          loginBtn.innerText = 'Dhan Login ⚙';
+          loginBtn.className = 'px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 transition whitespace-nowrap';
+        }
+
+        const autoStr = auth.auto_login_enabled ? `ON (${auth.auto_login_time || '09:00'})` : 'OFF';
+        const lastStr = auth.last_login_time && auth.last_login_time !== 'Never' ? ` | Last: ${auth.last_login_time}` : '';
+        document.getElementById('metricDhanLogin').innerText = `Auto-login: ${autoStr}${lastStr}`;
 
         // Positions
         const posTbody = document.getElementById('positionsTbody');
@@ -1455,11 +1535,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       refreshCurrentView();
     }
 
+    function renderDhanTokenBanner(auth) {
+      const banner = document.getElementById('dhanTokenBanner');
+      const titleEl = document.getElementById('dhanTokenBannerTitle');
+      const metaEl = document.getElementById('dhanTokenBannerMeta');
+      const testBtn = document.getElementById('modalLoginTestBtn');
+      if (!banner || !auth) return;
+
+      if (auth.is_logged_in) {
+        banner.className = 'p-3 rounded-xl border text-xs space-y-1 bg-emerald-950/40 border-emerald-800';
+        titleEl.className = 'font-bold text-emerald-400';
+        titleEl.innerText = `✅ Already Logged In to Dhan — Access Token Generated & Active`;
+        const parts = [];
+        if (auth.last_login_time && auth.last_login_time !== 'Never') parts.push(`Generated: ${auth.last_login_time}`);
+        if (auth.token_expires_at) parts.push(`Expires: ${auth.token_expires_at}`);
+        if (auth.token_preview) parts.push(`Token: ${auth.token_preview}`);
+        metaEl.innerText = parts.join('  •  ') || 'Session token verified.';
+        if (testBtn) testBtn.innerText = '🔄 Re-Generate Token Now';
+      } else if (auth.has_token && auth.is_expired) {
+        banner.className = 'p-3 rounded-xl border text-xs space-y-1 bg-amber-950/40 border-amber-800';
+        titleEl.className = 'font-bold text-amber-400';
+        titleEl.innerText = `🟡 Dhan Token Expired — Re-Login Required`;
+        metaEl.innerText = `Last Login: ${auth.last_login_time || 'Unknown'}  •  Expired: ${auth.token_expires_at || 'Yes'}`;
+        if (testBtn) testBtn.innerText = '🔑 Generate Token Now';
+      } else if (auth.last_login_status === 'FAILED') {
+        banner.className = 'p-3 rounded-xl border text-xs space-y-1 bg-rose-950/40 border-rose-800';
+        titleEl.className = 'font-bold text-rose-400';
+        titleEl.innerText = `🔴 Last Dhan Login Failed`;
+        metaEl.innerText = `${auth.last_login_time || ''} — ${auth.last_login_message || 'Check credentials'}`;
+        if (testBtn) testBtn.innerText = '🔑 Retry Login Now';
+      } else {
+        banner.className = 'p-3 rounded-xl border text-xs space-y-1 bg-slate-950 border-slate-800';
+        titleEl.className = 'font-bold text-slate-300';
+        titleEl.innerText = `⚪ Not Logged In to Dhan (No Active Token)`;
+        metaEl.innerText = 'Enter Client ID, PIN & TOTP Secret below and click Login Now or enable 09:00 AM Auto-Login.';
+        if (testBtn) testBtn.innerText = '🔑 Login & Generate Token';
+      }
+    }
+
     function openDhanAuthModal() {
       if (dashboardData.auth) {
         document.getElementById('authEnableCheck').checked = dashboardData.auth.auto_login_enabled;
         document.getElementById('authTradingMode').value = dashboardData.broker.trading_mode || 'PAPER';
         document.getElementById('authClientId').value = dashboardData.broker.client_id || '';
+        renderDhanTokenBanner(dashboardData.auth);
       }
       document.getElementById('dhanAuthModal').classList.remove('hidden');
     }
@@ -1492,12 +1611,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch(`/api/auth/login-dhan-now?user_id=${selectedUserId || ''}`, { method: 'POST' });
         const data = await res.json();
+        await refreshCurrentView();
+        if (dashboardData.auth) renderDhanTokenBanner(dashboardData.auth);
         alert(`Login Result: ${data.status}\n${data.message}`);
       } catch (e) {
         alert('Login failed: ' + e);
-      } finally {
-        btn.innerText = '🔑 Test Login Now';
-        refreshCurrentView();
+        if (dashboardData.auth) renderDhanTokenBanner(dashboardData.auth);
       }
     }
 
@@ -1807,12 +1926,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    let selectedLogDate = '';
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function getLogLineClass(line) {
+      if (line.includes('HOURLY SCAN STARTED') || line.includes('Bar Close Detected')) return 'text-indigo-300 font-semibold mt-1.5';
+      if (line.includes('HOURLY SCAN ENDED') || line.includes('✅') || line.includes('🟢')) return 'text-emerald-400';
+      if (line.includes('❌') || line.includes('🔴') || line.includes('FAILED')) return 'text-rose-400';
+      if (line.includes('⚠️') || line.includes('🚨') || line.includes('SKIPPED')) return 'text-amber-300';
+      if (line.includes('👤')) return 'text-slate-100 font-semibold mt-1';
+      return 'text-slate-300';
+    }
+
+    function onLogDateSelectChange(val) {
+      selectedLogDate = val;
+      fetchLogs();
+    }
+
     async function fetchLogs() {
       try {
-        const res = await fetch('/api/logs');
+        const url = selectedLogDate ? `/api/logs?date=${encodeURIComponent(selectedLogDate)}` : '/api/logs';
+        const res = await fetch(url);
         if (res.ok) {
           const data = await res.json();
-          document.getElementById('botLogs').innerHTML = data.logs.map(l => `<div>${l}</div>`).join('') || 'No logs yet.';
+          const selectEl = document.getElementById('logDateSelect');
+          if (selectEl && data.available_dates) {
+            const target = selectedLogDate || data.date || data.today;
+            selectEl.innerHTML = data.available_dates.map(d =>
+              `<option value="${d}">${d === data.today ? d + ' (Today)' : d}</option>`
+            ).join('');
+            selectEl.value = target;
+            selectedLogDate = target;
+          }
+
+          const logsEl = document.getElementById('botLogs');
+          if (!data.logs || data.logs.length === 0) {
+            logsEl.innerHTML = `<div class="text-slate-500 py-4 text-center">No activity logged for ${escapeHtml(data.date || 'this date')} yet.</div>`;
+          } else {
+            logsEl.innerHTML = data.logs.map(l => `<div class="${getLogLineClass(l)} whitespace-pre-wrap">${escapeHtml(l)}</div>`).join('');
+            logsEl.scrollTop = logsEl.scrollHeight;
+          }
         }
       } catch (e) {}
     }
